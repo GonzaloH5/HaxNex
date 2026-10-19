@@ -1,0 +1,75 @@
+name: release
+
+# Builds a release of the (private) app code and publishes it here, where the
+# app looks for updates. Run it from the Actions tab with the version number
+# (it must match native/player/Cargo.toml in the code repo, tag v<version>).
+# Public repos get free Actions minutes; the code repo stays private.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release, like 0.1.0 (tag v0.1.0 in GonzaloH5/haxballapp)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - name: Code
+        uses: actions/checkout@v4
+        with:
+          repository: GonzaloH5/haxballapp
+          ref: v${{ inputs.version }}
+          token: ${{ secrets.CODE_TOKEN }}
+
+      - name: Version
+        shell: bash
+        run: |
+          ver=$(grep -m1 '^version' native/player/Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          if [ "${ver}" != "${{ inputs.version }}" ]; then
+            echo "Cargo.toml says ${ver}, not ${{ inputs.version }}"; exit 1
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Campus dependencies
+        run: npm ci
+        working-directory: campus
+
+      - name: Build
+        run: cargo build --release -p haxball-player
+        working-directory: native
+
+      - name: Lay out the install tree
+        run: python native/tools/package.py ${{ inputs.version }} dist-release --no-zip
+
+      # Code signing goes here once there is a certificate: sign
+      # dist-release/app/haxball-player.exe.
+
+      - name: Zip and manifest
+        run: python native/tools/package.py ${{ inputs.version }} dist-release --zip-only
+
+      - name: Sign the manifest
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: node native/tools/sign.mjs sign dist-release/manifest.json
+
+      - name: Installer
+        run: iscc /DAppVersion=${{ inputs.version }} /DSourceDir=${{ github.workspace }}\dist-release\app /DOutDir=${{ github.workspace }}\dist-release native\installer\haxball.iss
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ inputs.version }}
+          files: |
+            dist-release/HaxBall-Setup-*.exe
+            dist-release/HaxBall-*-win64.zip
+            dist-release/manifest.json
